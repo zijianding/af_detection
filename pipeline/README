@@ -1,0 +1,4 @@
+function:
+first, input an record, calculate QRS, RR intervals, NEC, classification, output a quote "This is atrial fibrillation" or "This is not atrial fibrillation"
+then, draw the record plus the annotation of the quote,
+finally, sent this message to a wechat user
