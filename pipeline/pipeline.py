@@ -136,17 +136,21 @@ def indice2time(peak_indices, fs=300.):
 def qrs_detection(signal, min_bpm=20, max_bpm=230, smooth_window=150):
     #peak indices    
     d_sig = signal.adc()[:,0] #A/D convert necessary?
-    peak_indices = wfdb.processing.gqrs_detect(x=d_sig, fs = signal.fs, adcgain=signal.adcgain[0], adczero=signal.adczero[0])
+    peak_indices = wfdb.processing.gqrs_detect(x=d_sig, fs = signal.fs, 
+                                               adcgain=signal.adcgain[0], adczero=signal.adczero[0])
     
     #hr
-    hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=signal.fs)
-    hr = np.nanmean(hrs)
+    #hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=signal.fs)
+    #hr = np.nanmean(hrs)
+    #beats = wfdb.processing.gqrs_detect(x=d_sig, fs = signal.fs, 
+    ##                                    adcgain=signal.adcgain[0], 
+     #                                   adczero=signal.adczero[0], hr = hr)
     
     #correct peaks
     min_gap = signal.fs * 60 / min_bpm
     max_gap = signal.fs * 60 / max_bpm
     peak_indices = wfdb.processing.correct_peaks(d_sig, peak_indices=peak_indices, min_gap=min_gap, 
-                                                 max_gap = max_gap, smooth_window = smooth_window, hr = hr)
+                                                 max_gap = max_gap, smooth_window = smooth_window)
     
     peak_time = indice2time(peak_indices, fs = signal.fs)
                                                 
@@ -158,10 +162,10 @@ def qrs_detection_dsig(d_sig, fs, min_bpm=20, max_bpm=230, smooth_window=150):
     peak_indices = wfdb.processing.gqrs_detect(x=d_sig, fs = fs, adcgain=1000., adczero=0.)
     
     #hr
-    hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=fs)
-    hr = np.nanmean(hrs)
-    hr = np.nanmean(hr)
-    beats = wfdb.processing.gqrs_detect(x=d_sig, fs = fs, adcgain=1000., adczero=0, hr = hr)
+    #hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=fs)
+    #hr = np.nanmean(hrs)
+    #hr = np.nanmean(hr)
+    #beats = wfdb.processing.gqrs_detect(x=d_sig, fs = fs, adcgain=1000., adczero=0, hr = hr)
     #correct peaks
     min_gap = fs * 60 / min_bpm
     max_gap = fs * 60 / max_bpm
@@ -294,6 +298,10 @@ def comparison(name, label, prediction):
         return 'TN'
 
 def roc_curve(train_data, nec_dict):
+    """
+    train_data: pandas data frame
+    nec_dict: a dictionary
+    """    
     m = len(train_data)
     gap = 1 / float(m)
 
@@ -309,10 +317,10 @@ def roc_curve(train_data, nec_dict):
         tn = 0.
         fp = 0.
         fn = 0.
-        for j in range(0, len(train_data)):
-            curr_sample = train_data[j][0]
-            curr_label = train_data[j][1]
-            pred = classify( nec_dict[curr_sample], curr_thresh, words = False)
+        for j in list(train_data.index):
+            curr_sample = train_data[0][j]
+            curr_label = train_data[1][j]
+            pred, _ = classify( nec_dict[curr_sample], curr_thresh, words = False)
             comp = comparison( curr_sample, curr_label, pred)
             if comp == 'TP':
                 tp += 1.
@@ -334,6 +342,93 @@ def roc_curve(train_data, nec_dict):
     return res, sensitivity, specificity,  gaps
 
 
+###### find proper threshold #####
+
+
+def plotROC(sensitivity, specificity):
+    plt.figure()
+    plt.clf()
+    plt.plot(1-specificity, sensitivity)
+    plt.xlabel('1-specificity')
+    plt.ylabel('sensitivity')
+    plt.title('ROC curve for Train Data')
+    auc = np.trapz(sensitivity, 1-specificity)
+    print("The AUC is", str(auc))
+    
+
+def find_threshold(sensitivity, specificity,
+                   threshold, sensi_thresh=None,
+                   speci_thresh=None):
+    index = 0.
+    min_dist = 1000000.
+    if (sensi_thresh == None) and (speci_thresh == None):
+        #find the dot with a shortest distance to (0,1)
+        for i in range(0, len(sensitivity)):
+            curr_dist = np.sqrt( (1-specificity[i])*(1-specificity[i]) +
+                                 (sensitivity[i]-1)*(sensitivity[i]-1) )
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                index = i
+    elif (sensi_thresh != None) and (speci_thresh != None):
+        for i in range(0, len(sensitivity)):
+            curr_dist = np.sqrt((sensitivity[i]-sensi_thresh) * (sensitivity[i]-sensi_thresh) +
+                                (specificity[i]-speci_thresh) * (specificity[i]-speci_thresh))
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                index = i
+    elif (sensi_thresh != None) and (speci_thresh == None):
+        for i in range(0, len(sensitivity)):
+            curr_dist = np.abs(sensitivity[i] - sensi_thresh)
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                index = i
+    elif (sensi_thresh == None) and (speci_thresh != None):
+        for i in range(0, len(specificity)):
+            curr_dist = np.abs(specificity[i] - speci_thresh)
+            if curr_dist < min_dist:
+                min_dist = curr_dist
+                index = i
+
+    return threshold[index], sensitivity[index], specificity[index], index
+      
+      
+def threshold(path='/home/dingzj/workspace/ECG/data/training2017', use_beat = 32,
+                   sensi_thresh = None, speci_thresh = None):  
+    records = pandas.read_table(path + '/RECORDS', header=None) #records[0][0], [0][1], a col
+    samples = read_all_signal(path, records)
+    labels = pandas.read_csv(path + '/REFERENCE-v3.csv', header=None) #
+        
+    nec_dict = dict()
+    ix = list()
+    for i in range(len(labels)):
+        name = labels[0][i]
+        signal = samples[name+'signal']
+        #qrs indices        
+        qrs_indices, qrs_time = qrs_detection(signal, min_bpm=20, max_bpm=230, smooth_window=150)
+    
+        # rr and drr
+        rr = rr_interval(qrs_time, thresh=use_beat+2, section='sub')
+        if (type(rr) is np.ndarray) and (len(rr) > use_beat):
+            ix.append(i)            
+            drr = drr_interval(rr)
+            #nec
+            nec, nec_norm = nec_calc(rr, drr)  
+            nec_dict[name] = nec_norm
+    
+    labels = labels.iloc[ix]
+    results, sensitivity, specificity,  gaps = roc_curve(labels, nec_dict)
+    plotROC(sensitivity, specificity)
+    final_thresh, sensi_level, speci_level, index= find_threshold(sensitivity, 
+                                                                  specificity,
+                                                                  gaps, 
+                                                                  sensi_thresh,
+                                                                  speci_thresh)
+    return final_thresh, sensi_level, speci_level       
+    
+    
+    
+
+
 
 ######## draw ECG ############
 def plot_ecg(signal, hea, text):
@@ -346,21 +441,21 @@ def plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_
     for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
         if xx % (pixel_per_mm*5) == 0:    
             plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r',
-                      linestyle='-', linewidth=2, alpha=0.4)
+                      linestyle='-', linewidth=1, alpha=0.4)
         else:
             plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', 
-                     linestyle='-', linewidth=1, alpha=0.2)
+                     linestyle='-', linewidth=0.5, alpha=0.2)
 
     for yy in range(min_point_amp_count, max_point_amp_count,pixel_per_mm):
         if yy % (5*pixel_per_mm) == 0 and yy != 0:
-            plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=2,alpha=0.6)
+            plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=1,alpha=0.4)
         else:
             if yy != 0:
                 plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-',
-                         linewidth=1,alpha=0.2)
+                         linewidth=0.5,alpha=0.2)
             else:
                 plt.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', 
-                         linewidth=2,alpha=0.4)
+                         linewidth=1,alpha=0.4)
 
 def plot_save_ecg(ecg_sig, qrs_indices, #np.array
                   save_path, png_name, figsize = (25,35),
@@ -386,8 +481,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         plt.figure(1,figsize=figsize,dpi=96)
         plt.clf()
         
-        plt.plot(ecg_sig * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
         plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ) 
+        plt.plot(ecg_sig * 10 * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=0.9)
         # r peak annotations
         # horizontal black lines
         plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count], 
@@ -427,9 +522,10 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             curr_qrs -= min_p
             
             plt.subplot(subplot_RowNum, 1, i+1)
-            plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
             # the red boxes
-            plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )                     
+            plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )              
+            plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
+                              
             # r peak annotations
             # horizontal black lines
             plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count], 
@@ -462,8 +558,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         curr_qrs -= min_p
         
         plt.subplot(subplot_RowNum, 1, subplot_RowNum)
-        plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
-        plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )  
+        plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )          
+        plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=0.9)
         # r peak annotations
         # horizontal black lines
         plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count],
@@ -553,6 +649,11 @@ def plot_r_peak(raw_sig, qrs_arr):
     
     ### test data from SunLi###
     # argv ##
+
+#final_thresh, sensi_level, speci_level = find_threshold(path='/home/dingzj/workspace/ECG/data/training2017', 
+#                                                        use_beat = 16,
+#                                                        sensi_thresh = None, speci_thresh = None)
+    
 from sys import argv
 script, path, name, save_path, use_beats, thresh = argv
 """
@@ -564,8 +665,8 @@ use_beats: number of intervals to use
 thresh: threshold to classify  
 """ 
     # read signal #
-    path = 'C:/Users/neudz_000/Desktop/pipepline/data' # args
-    name = 'ecg-20171225-144847.mat' # args
+#    path = 'C:/Users/neudz_000/Desktop/pipepline/data' # args
+#    name = 'ecg-20171225-144847.mat' # args
     
 record = sio.loadmat(path+'/'+name,squeeze_me=True)
 d_sig = record['val']
@@ -589,6 +690,7 @@ drr = drr_interval(rr)
 nec, nec_norm = nec_calc(rr, drr)    
     
     #classify
+if ()
 pred, word = classify(nec_norm, thresh=0.75, words=True) # 0.75, args
     
     #send
