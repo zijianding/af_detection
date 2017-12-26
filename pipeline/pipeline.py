@@ -6,8 +6,13 @@ import matplotlib.pyplot as plt
 import pandas
 #import pickle
 from IPython.display import display
-import itchat, time
+import itchat
 from itchat.content import *
+#import sys
+#import numpy as np
+import scipy.signal
+import scipy.ndimage
+#import pickle
 
 
 ####### input signal #########
@@ -16,15 +21,33 @@ def read_signal(file_path, record_name):
 	signal = wfdb.rdsamp(recordname = file)
 	hea = wfdb.rdheader(file)
 	return signal, hea
- 
 
+def read_all_signal(file_path, records):
+    n_sample = records.shape[0]
+    samples = {}
+    for i in range(n_sample):
+        name = records[0][i]
+        signal, hea = read_signal(file_path, name)
+        samples[name + 'signal'] = signal
+        samples[name + 'header'] = hea
+    return samples
+
+def alivecor_sig_stat(samples, names):
+    sig_mins = np.zeros((len(names)))
+    sig_maxs = np.zeros((len(names)))
+    adcgains = np.zeros((len(names)))
+    adczeros = np.zeros((len(names)))
+    
+    for i in range(len(names)):
+        signal = samples[names[i] + 'signal']
+        d_signal = signal.adc()[:,0]
+        sig_mins[i] = d_signal.min()
+        sig_maxs[i] = d_signal.max()
+        adcgains[i] = signal.adcgain[0]
+        adczeros[i] = signal.adczero[0]
+        
+    return sig_mins, sig_maxs, adcgains, adczeros
 ######## detect beats ##############
-#import sys
-#import numpy as np
-import scipy.signal
-import scipy.ndimage
-#import pickle
-
 
 def detect_beats(
         ecg,  # The raw ECG signal
@@ -117,18 +140,37 @@ def qrs_detection(signal, min_bpm=20, max_bpm=230, smooth_window=150):
     
     #hr
     hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=signal.fs)
+    hr = np.nanmean(hrs)
     
     #correct peaks
     min_gap = signal.fs * 60 / min_bpm
     max_gap = signal.fs * 60 / max_bpm
     peak_indices = wfdb.processing.correct_peaks(d_sig, peak_indices=peak_indices, min_gap=min_gap, 
-                                                 max_gap = max_gap, smooth_window = smooth_window)
+                                                 max_gap = max_gap, smooth_window = smooth_window, hr = hr)
     
     peak_time = indice2time(peak_indices, fs = signal.fs)
                                                 
     return peak_indices, peak_time
     
+def qrs_detection_dsig(d_sig, fs, min_bpm=20, max_bpm=230, smooth_window=150):
+    #peak indices    
+    #d_sig = signal.adc()[:,0] #A/D convert necessary?
+    peak_indices = wfdb.processing.gqrs_detect(x=d_sig, fs = fs, adcgain=1000., adczero=0.)
     
+    #hr
+    hrs = wfdb.processing.compute_hr(siglen=d_sig.shape[0], peak_indices=peak_indices, fs=fs)
+    hr = np.nanmean(hrs)
+    hr = np.nanmean(hr)
+    beats = wfdb.processing.gqrs_detect(x=d_sig, fs = fs, adcgain=1000., adczero=0, hr = hr)
+    #correct peaks
+    min_gap = fs * 60 / min_bpm
+    max_gap = fs * 60 / max_bpm
+    peak_indices = wfdb.processing.correct_peaks(d_sig, peak_indices=peak_indices, min_gap=min_gap, 
+                                                 max_gap = max_gap, smooth_window = smooth_window)
+    
+    peak_time = indice2time(peak_indices, fs = fs)
+                                                
+    return peak_indices, peak_time
 
 ####### RR interval ##########
 #input qrs file#
@@ -300,7 +342,31 @@ def plot_ecg(signal, hea, text):
     display(hea.__dict__)
 
 
-def plot_save_ecg(ecg_sig, save_path, png_name, fs = 300,mm_per_mv = 10.0, mm_per_s = 25.0, max_mv = 2.5, min_mv = -2.5):
+def plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ):
+    for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
+        if xx % (pixel_per_mm*5) == 0:    
+            plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r',
+                      linestyle='-', linewidth=2, alpha=0.4)
+        else:
+            plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', 
+                     linestyle='-', linewidth=1, alpha=0.2)
+
+    for yy in range(min_point_amp_count, max_point_amp_count,pixel_per_mm):
+        if yy % (5*pixel_per_mm) == 0 and yy != 0:
+            plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=2,alpha=0.6)
+        else:
+            if yy != 0:
+                plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-',
+                         linewidth=1,alpha=0.2)
+            else:
+                plt.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', 
+                         linewidth=2,alpha=0.4)
+
+def plot_save_ecg(ecg_sig, qrs_indices, #np.array
+                  save_path, png_name, figsize = (25,35),
+                  fs = 300, 
+                  mm_per_mv = 10.0, mm_per_s = 25.0, 
+                  max_mv = 2.5, min_mv = -2.5):
     '''
     ecg_sig: ecg signal
     fs: ecg sample rate
@@ -317,92 +383,125 @@ def plot_save_ecg(ecg_sig, save_path, png_name, fs = 300,mm_per_mv = 10.0, mm_pe
     min_point_amp_count = int(min_mv * mm_per_mv * pixel_per_mm)
     
     if subplot_RowNum == 1:
-        plt.figure(1,figsize=(75,15),dpi=96)
+        plt.figure(1,figsize=figsize,dpi=96)
         plt.clf()
-
+        
         plt.plot(ecg_sig * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
-        for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
-            if xx % (pixel_per_mm*5) == 0:
-                plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=2,alpha=0.6)
-            else:
-                plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=1,alpha=0.4)
-
-        for yy in range(min_point_amp_count, max_point_amp_count,pixel_per_mm):
-            if yy % (5*pixel_per_mm) == 0 and yy != 0:
-                plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=2,alpha=0.6)
-            else:
-                if yy != 0:
-                    plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=1,alpha=0.4)
-                else:
-                    plt.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', linewidth=2,alpha=0.6)
+        plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ) 
+        # r peak annotations
+        # horizontal black lines
+        plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count], 
+                 color = 'k',  linewidth = 2, alpha = 0.5 )
+        # vertical r pkeas
+        for xx in qrs_indices:
+            plt.plot( [xx, xx], [min_point_amp_count, min_point_amp_count + pixel_per_mm * 2 ],
+                     color = 'k', linewidth = 2, alpha=0.7 )
         plt.xlabel('time/s',fontsize=40,horizontalalignment='right')
         plt.yticks(fontsize=25)
-        plt.ylabel('amp/mv',fontsize=25,verticalalignment='top',rotation='vertical')
-        plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], fontsize=40)
-        plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)), [-2.5, -2.0, -1.5, -1.0, 0.5, 0, 0.5, 1.0, 1.5, 2.0, 2.5], fontsize=40)
+        plt.ylabel('amp/mv',fontsize=25,
+                   #verticalalignment='top',
+                   rotation='vertical')
+        plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
+                   [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], fontsize=40)
+        plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)), 
+                   [-2.5, -2.0, -1.5, -1.0, 0.5, 0, 0.5, 1.0, 1.5, 2.0, 2.5], fontsize=40)
         plt.axis('equal')
-        
         plt.savefig(save_path + '/' + png_name)  
+        
+        plt.close()
         
     elif subplot_RowNum > 1:
         # signal longer than 10s
-        plt.figure(1, figsize=(75,45), dpi = 96)
+        plt.figure(1, figsize=figsize, dpi = 96)
         plt.clf()
         
         for i in range(0, subplot_RowNum - 1):
-            curr_ecg = ecg_sig[range(i * fs * 10, (i+1) * fs * 10)]
+            min_p = i*fs*10
+            max_p = (i+1) * fs * 10
+            #curr ecg
+            curr_ecg = ecg_sig[range(min_p, max_p)]
+            #current qrs_indices
+            m1 = qrs_indices >= min_p
+            m2 = qrs_indices <= max_p
+            curr_qrs = qrs_indices[m1*m2]
+            curr_qrs -= min_p
+            
             plt.subplot(subplot_RowNum, 1, i+1)
             plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
-            for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
-                if xx % (pixel_per_mm*5) == 0:
-                    plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=2,alpha=0.6)
-                else:
-                    plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=1,alpha=0.4)
-
-            for yy in range(min_point_amp_count, max_point_amp_count,pixel_per_mm):
-                if yy % (5*pixel_per_mm) == 0 and yy != 0:
-                    plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=2,alpha=0.6)
-                else:
-                    if yy != 0:
-                        plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=1,alpha=0.4)
-                    else:
-                        plt.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', linewidth=2,alpha=0.6)
-            plt.xlabel('time/s',fontsize=40,horizontalalignment='right')
-            plt.yticks(fontsize=25)
-            plt.ylabel('amp/mv',fontsize=25,verticalalignment='top',rotation='vertical')
-            plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], fontsize=40)
-            plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)), [-2.5, -2.0, -1.5, -1.0, 0.5, 0, 0.5, 1.0, 1.5, 2.0, 2.5], fontsize=40)
+            # the red boxes
+            plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )                     
+            # r peak annotations
+            # horizontal black lines
+            plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count], 
+                     color = 'k',  linewidth = 2, alpha = 0.7 )
+            # vertical r pkeas
+            for xx in curr_qrs:
+                plt.plot( [xx, xx], [min_point_amp_count, min_point_amp_count + pixel_per_mm * 3 ], 
+                         color = 'k', linewidth = 2, alpha=0.7 ) 
+            #plt.xlabel('time/s',fontsize=10,horizontalalignment='right')
+            #plt.yticks(fontsize=10)
+            plt.ylabel('amp/mv',fontsize=20,
+                       #verticalalignment='top',
+                       rotation='vertical')
+            
+            xtick = range( i*10, i*10 +10 )
+            plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
+                       xtick, fontsize=15)
+            ytick = range(int(min_mv * 10), int(max_mv * 10)+ 5, 5)
+            ytick = [float(item)/10. for item in ytick]
+            plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)),
+                       ytick, fontsize=10)
             plt.axis('equal')
         
-        curr_ecg = ecg_sig[range( (subplot_RowNum - 1) * fs * 10, len(ecg_sig) )]
+        min_p = (subplot_RowNum - 1) * fs * 10
+        max_p = len(ecg_sig)
+        curr_ecg = ecg_sig[range( min_p, max_p )]
+        m1 = qrs_indices >= min_p
+        m2 = qrs_indices <= max_p
+        curr_qrs = qrs_indices[m1*m2]
+        curr_qrs -= min_p
+        
         plt.subplot(subplot_RowNum, 1, subplot_RowNum)
         plt.plot(curr_ecg * 10 * pixel_per_mm, color='k', label='ecg', linewidth=2, alpha=0.9)
-        for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
-            if xx % (pixel_per_mm*5) == 0:
-                plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=2,alpha=0.6)
-            else:
-                plt.plot([xx, xx], [min_point_amp_count,max_point_amp_count], color='r', linestyle='-', linewidth=1,alpha=0.4)
+        plot_red_lines(pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )  
+        # r peak annotations
+        # horizontal black lines
+        plt.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count],
+                 color = 'k',  linewidth = 2, alpha = 0.7 )
+        # vertical r pkeas
+        for xx in curr_qrs:
+            plt.plot( [xx, xx], [min_point_amp_count, min_point_amp_count + pixel_per_mm * 3 ], 
+                     color = 'k', linewidth = 2, alpha=0.7 )
         
-        for yy in range(min_point_amp_count, max_point_amp_count,pixel_per_mm):
-            if yy % (5*pixel_per_mm) == 0 and yy != 0:
-                plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=2,alpha=0.6)
-            else:
-                if yy != 0:
-                    plt.plot([0, max_point_time_count], [yy, yy], color='r', linestyle='-', linewidth=1,alpha=0.4)
-                else:
-                    plt.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', linewidth=2,alpha=0.6)
-        plt.xlabel('time/s',fontsize=40,horizontalalignment='right')
-        plt.yticks(fontsize=25)
-        plt.ylabel('amp/mv',fontsize=25,verticalalignment='top',rotation='vertical')
-        plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10], fontsize=40)
-        plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)), [-2.5, -2.0, -1.5, -1.0, 0.5, 0, 0.5, 1.0, 1.5, 2.0, 2.5], fontsize=40)
+        xtick = range( ( subplot_RowNum -1 ) * 10, ( subplot_RowNum -1 ) * 10 + 10 )
+        plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
+                   xtick, fontsize=15)
+        plt.xlabel('time/s',fontsize=20,horizontalalignment='right')
+        #plt.yticks(fontsize=10)
+        plt.ylabel('amp/mv',fontsize=20,
+                   #verticalalignment='top',
+                   rotation='vertical')
+        ytick = range(int(min_mv * 10), int(max_mv * 10)+ 5, 5)
+        ytick = [float(item)/10. for item in ytick]
+        plt.yticks(range(min_point_amp_count, max_point_amp_count, int(0.5 * mm_per_mv * pixel_per_mm)), 
+                   #[-2.5, -2.0, -1.5, -1.0, 0.5, 0, 0.5, 1.0, 1.5, 2.0, 2.5], 
+                   ytick,
+                   fontsize=10)
         plt.axis('equal')
         
         plt.savefig(save_path + '/' + png_name)
+        plt.close()
     
     
 
-
+def plot_r_peak(raw_sig, qrs_arr):
+    plt.figure(1)
+    plt.plot(raw_sig, label = 'raw signal')
+    amp_list = [raw_sig[x] for x in qrs_arr]
+    plt.plot(qrs_arr, amp_list, 'r^', markersize = 12)
+    plt.title('Raw signal')
+    #plt.legend()
+    plt.show()
     
     
 
@@ -410,67 +509,93 @@ def plot_save_ecg(ecg_sig, save_path, png_name, fs = 300,mm_per_mv = 10.0, mm_pe
 
 
 ####### main #######
-if __name__ == 'main':
+#if __name__ == 'main':
     
-    ###test on aliveCor data###    
-    path = '/home/dingzj/workspace/ECG/data/training2017'
-    name = 'A00001'
-    # read data    
-    signal, hea = read_signal(path, name)
-    d_signal = signal.adc()[:,0]
-    
-    # calc qrs
-    qrs_indices, qrs_time = qrs_detection(signal, min_bpm=20, max_bpm=230, smooth_window=150)
-    
-    # rr and drr
-    rr = rr_interval(qrs_time, thresh=16+2, section='sub')
-    drr = drr_interval(rr)
-    
-    #nec
-    nec, nec_norm = nec_calc(rr, drr)    
-    
-    #classify
-    pred, word = classify(nec_norm, thresh=0.75, words=True)
-    
-   
-    # plot
-    #name_file = 'A00001.mat'
-    #record = sio.loadmat(path+'/'+name_file,squeeze_me=True)
-    #sig = record['keypoint']['ecg'].tolist()
-    #sig = record['val'].tolist()
-    plot_save_ecg(signal.p_signals, save_path = '/home/dingzj/workspace/ECG/Test_bin/pipeline',
-                  png_name = name+'.png', fs = signal.fs)
-
-    
-    #send
-    itchat.auto_login(True)
-    @itchat.msg_register(TEXT, MAP, CARD, NOTE)
-    def text_reply(msg, words=word):
-        itchat.send('%s' % (words), msg['FromUserName'])
-        itchat.send('@img@%s' % (path+'/ecg.png'), msg['FromUserName'])
-    itchat.run()
-    
-    ###OR read from qrs files
-#    #read qrs
-#    qrs = read_qrs('/home/dingzj/workspace/ECG/data/challenge2017_qrs', 'A00001')
-#    qrs = qrs_convert(qrs)   
+#    ###test on aliveCor data###    
+#    path = 'C:/Users/neudz_000/Desktop/pipepline/data/training2017/training2017'
+#    name = 'A00005'
+#    # read data    
+#    signal, hea = read_signal(path, name)
+#    d_signal = signal.adc()[:,0]
 #    
-#    #calculate rr and drr
+#    # calc qrs
+#    qrs_indices, qrs_time = qrs_detection(signal, min_bpm=20, max_bpm=230, smooth_window=150)
 #    
-#    rr = rr_interval(qrs, thresh=16+2, section='sub')
-#    drr = drr_interval(rr) 
+#    # rr and drr
+#    rr = rr_interval(qrs_time, thresh=16+2, section='sub')
+#    drr = drr_interval(rr)
+#    
+#    #nec
+#    nec, nec_norm = nec_calc(rr, drr)    
+#    
+#    #classify
+#    pred, word = classify(nec_norm, thresh=0.75, words=True)
+#      
+#    # plot
+#    plot_save_ecg(signal.p_signals, save_path = 'C:/Users/neudz_000/Desktop/',
+#                  png_name = name+'.png', fs = signal.fs)
+#
+#    #send
+#    itchat.auto_login(True)
+#    @itchat.msg_register(TEXT, MAP, CARD, NOTE)
+#    def text_reply(msg, words=word):
+#        itchat.send('%s' % (words), msg['FromUserName'])
+#        itchat.send('@img@%s' % (path+'/ecg.png'), msg['FromUserName'])
+#    itchat.run()
+    
+    
+#    # ecg statistic#
+#    path = 'C:/Users/neudz_000/Desktop/pipepline/data/training2017/training2017'
+#    records = pandas.read_table(path + '/RECORDS', header=None) #records[0][0], [0][1], a col
+#    samples = read_all_signal(path, records)
+#    
+#    sig_mins, sig_maxs, adcgains, adczeros = alivecor_sig_stat(samples, list(records[0]))
     
     ### test data from SunLi###
-    path = '/home/dingzj/workspace/ECG/Test_bin/pipeline'
-    name = 'test_20171219_125sample_5smooth.mat'
+    # argv ##
+from sys import argv
+script, path, name, save_path, use_beats, thresh = argv
+"""
+command: python pipeline.py "path" "name" "save_path" "use_beats" "thresh"   
+path: path to .mat file folder
+name: file name of the .mat file
+save_path: path to .png save folder
+use_beats: number of intervals to use
+thresh: threshold to classify  
+""" 
+    # read signal #
+    path = 'C:/Users/neudz_000/Desktop/pipepline/data' # args
+    name = 'ecg-20171225-144847.mat' # args
     
-    record = sio.loadmat(path+'/'+name,squeeze_me=True)
-    d_sig = record['So']
-    fs = 125.
+record = sio.loadmat(path+'/'+name,squeeze_me=True)
+d_sig = record['val']
     
-    beats = detect_beats(d_sig, rate = fs)
+    # r peak #
+qrs_indices, qrs_time = qrs_detection_dsig(d_sig* 100000., 300,  min_bpm=20, max_bpm=230, smooth_window=150)
     
+#qrs_time = indice2time(qrs_indices, 685.)
+    # plot ecg #
+plot_save_ecg(d_sig*100., qrs_indices = np.array(qrs_indices), 
+              save_path = 'C:/Users/neudz_000/Desktop/', #'C:/Users/neudz_000/Desktop/', #args
+              png_name = name+'.png', 
+              figsize = (10,30), fs = 300,
+              max_mv = 3.5, min_mv = -3.5)
     
+    # rr and drr
+rr = rr_interval(qrs_time, thresh=32+2, section='sub') # 32 +2 , args
+drr = drr_interval(rr) 
     
-
-
+    #nec
+nec, nec_norm = nec_calc(rr, drr)    
+    
+    #classify
+pred, word = classify(nec_norm, thresh=0.75, words=True) # 0.75, args
+    
+    #send
+itchat.auto_login(True)
+@itchat.msg_register(TEXT, MAP, CARD, NOTE)
+def text_reply(msg, words=word):
+    itchat.send('%s' % (words), msg['FromUserName'])
+    itchat.send('@img@%s' % (path+'/ecg.png'), msg['FromUserName'])
+itchat.run()
+    
