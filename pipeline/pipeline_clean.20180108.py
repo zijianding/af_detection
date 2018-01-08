@@ -623,7 +623,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         
         xtick = range( ( subplot_RowNum -1 ) * 10, ( subplot_RowNum -1 ) * 10 + 10 )
         plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
-                   xtick, fontsize=20)
+                   xtick, fontsize=15)
         plt.xlabel('time/s',fontsize=25,horizontalalignment='right')
         #plt.yticks(fontsize=10)
         ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
@@ -632,7 +632,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
                    #verticalalignment='top',
                    rotation='vertical')
         
-        #plt.axis('equal')
+        plt.axis('equal')
         
         fig.savefig(save_path + '/' + png_name)
         plt.close()
