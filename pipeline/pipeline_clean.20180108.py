@@ -47,7 +47,6 @@ def cutoff(sig, cutoff_thresh = 0.005, index = 100):
     tmp = tmp[0]
     tmp2 = np.where(tmp <= index)
     tmp2 = tmp2[0]
-    
     spot = tmp[ tmp2[len(tmp2) - 1] ] + 1
     #return value
     tmp = list()
@@ -68,12 +67,19 @@ def add_sig(sig, add_time = 6 * 300):
     for i in range(len(sig), len(sig) + add_time):
         tmp.append(0.0)
     return np.array(tmp)
-    
+
+def keep_sig(sig, fs = 300, keep_time = 30):
+    if len(sig) <= fs * keep_time:
+        return sig
+    else:
+        tmp = len(sig) - fs * keep_time
+        return sig[tmp:len(sig)]
 
 def audio2mat(path, name, param_file):
     #read wav
     sig, fs = sf.read( path + '/' + name)
     sig = sig[:,0]
+    sig_time = len(sig) / fs
     # read parameters
     hd_15k = sio.loadmat(param_file)
     ahd = hd_15k['aHd_15k']
@@ -98,6 +104,8 @@ def audio2mat(path, name, param_file):
     val = scipy.signal.lfilter(bhigh[0,:], ahigh[0,:], val2)
     # delete phase shift
     val = del_phaseShift(val, shift_time = 6 * 300)
+    # keep 30s long sig
+    val = keep_sig(val, 300, sig_time)
     
     return val
 
@@ -344,10 +352,18 @@ def adjust_ylim(ecg, max_mv = 2.5, min_mv = -2.5):
     maxval = np.max(ecg)
     minval = np.min(ecg)
     if maxval > max_mv:
-        max_mv = np.ceil(maxval)
+        maxval = np.ceil(maxval)
+        if maxval / max_mv > 1.5:
+            maxval = max_mv * 1.5
+    else:
+        maxval = max_mv
     if minval < min_mv:
-        min_mv = - np.ceil(np.abs(minval))    
-    return max_mv, min_mv
+        minval = - np.ceil(np.abs(minval))
+        if minval / min_mv > 1.5:
+            minval = min_mv * 1.5
+    else:
+        minval = min_mv
+    return maxval, minval
     
 def plot_red_lines(fig, pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ):
     for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
@@ -368,6 +384,102 @@ def plot_red_lines(fig, pixel_per_mm, max_point_time_count, max_point_amp_count,
                 fig.plot([0, max_point_time_count], [0, 0], color='r', linestyle='-', 
                          linewidth=1,alpha=0.6)
 
+def plot_curve(fig, sig, mm_per_mv, pixel_per_mm, max_mv, min_mv):
+    if np.max(sig) <= max_mv and np.min(sig) >= min_mv:
+        fig.plot(sig * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=1)
+    else:
+        ix_up = np.where(sig > max_mv)
+        ix_up = ix_up[0]        
+        ix_down = np.where(sig < min_mv)
+        ix_down = ix_down[0]
+        ix = np.concatenate((ix_up, ix_down))
+        ix = np.sort(ix)
+        #find sub-curves out of bounds
+        tmp = list()
+        start = ix[0]
+        end = ix[1]
+        for i in range(1,len(ix)):
+            if ix[i] - ix[i-1] > 1:
+                end = ix[i-1]
+                tmp.append([start, end])
+                start = ix[i]
+                end = ix[i+1]
+            if i == len(ix) - 1:
+                end = ix[i]
+                tmp.append([start, end])
+        #find sub-curves in bounds
+        curves = list()
+        start = 0
+        end = tmp[0][0]
+        for i in range(0, len(tmp)):
+            curves.append([start, end])
+            start = tmp[i][1] + 1
+            if i == len(tmp) - 1:
+                end = len(sig)
+                curves.append([start, end])
+            else:
+                end = tmp[i+1][0]
+        #draw curves
+        for i in range(len(curves)):
+            start = curves[i][0]
+            end = curves[i][1]
+            if i != 0 and i != len(curves) - 1:
+                # add some dots                
+                if sig[start] < 0:
+                    fig.plot(range(start-1, start+1), 
+                             [min_mv * mm_per_mv * pixel_per_mm, 
+                              sig[start] * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                if sig[start] > 0:
+                    fig.plot(range(start-1, start+1), 
+                             [max_mv * mm_per_mv * pixel_per_mm, 
+                              sig[start] * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                
+                if sig[end] < 0:
+                    fig.plot(range(end-1, end+1), 
+                             [sig[end-1] * mm_per_mv * pixel_per_mm, 
+                              min_mv * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                if sig[end] > 0:
+                    fig.plot(range(end-1, end+1), 
+                             [sig[end-1] * mm_per_mv * pixel_per_mm, 
+                              max_mv * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)    
+                #the sub-curve
+                fig.plot(range(start,end), sig[start:end] * mm_per_mv * pixel_per_mm, 
+                         color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+            elif i == 0:
+                if sig[end] < 0:
+                    fig.plot(range(end-1, end+1), 
+                             [sig[end-1] * mm_per_mv * pixel_per_mm, 
+                              min_mv * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                if sig[end] > 0:
+                    fig.plot(range(end-1, end+1), 
+                             [sig[end-1] * mm_per_mv * pixel_per_mm, 
+                              max_mv * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1) 
+                fig.plot(range(start,end), sig[start:end] * mm_per_mv * pixel_per_mm, 
+                         color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+            else:
+                if sig[start] < 0:
+                    fig.plot(range(start-1, start+1), 
+                             [min_mv * mm_per_mv * pixel_per_mm, 
+                              sig[start] * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                if sig[start] > 0:
+                    fig.plot(range(start-1, start+1), 
+                             [max_mv * mm_per_mv * pixel_per_mm, 
+                              sig[start] * mm_per_mv * pixel_per_mm],
+                             color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+                fig.plot(range(start,end), sig[start:end] * mm_per_mv * pixel_per_mm, 
+                         color = 'k', label = 'ecg', linewidth = 1.5, alpha = 1)
+            
+        
+        
+
+
 def plot_save_ecg(ecg_sig, qrs_indices, #np.array
                   save_path, png_name, figsize = (25,35),
                   fs = 300, 
@@ -385,19 +497,23 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         
     pixel_per_mm = np.int(np.floor(1 / mm_per_s * fs))
     max_point_time_count = int(mm_per_s * 10 * pixel_per_mm)
+    max_point_amp_count = int(max_mv * mm_per_mv * pixel_per_mm)
+    min_point_amp_count = int(min_mv * mm_per_mv * pixel_per_mm)
     
     if subplot_RowNum == 1:
         # define ylim
-        max_mv, min_mv = adjust_ylim(ecg_sig, max_mv = max_mv, min_mv = min_mv)
-        max_point_amp_count = int(max_mv * mm_per_mv * pixel_per_mm)
-        min_point_amp_count = int(min_mv * mm_per_mv * pixel_per_mm)
-        
+        #max_mv, min_mv = adjust_ylim(ecg_sig, max_mv = max_mv, min_mv = min_mv)
+
         fig = plt.figure(1,figsize=figsize,dpi=96)
         fig.clf()
         
               
         plot_red_lines(fig, pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ) 
-        fig.plot(ecg_sig * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=1)
+        #fig.plot(ecg_sig * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=1)
+        plot_curve(fig = fig, sig = ecg_sig, 
+                   mm_per_mv = mm_per_mv, 
+                   pixel_per_mm = pixel_per_mm, 
+                   max_mv = max_mv, min_mv = min_mv)        
         # r peak annotations
         # horizontal black lines
         fig.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count], 
@@ -413,7 +529,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         plt.ylabel('amp/mv',fontsize=40,
                    #verticalalignment='top',
                    rotation='vertical')
-        ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mvp - min_mv) / 4) )
+        ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
         plt.yticks(ytick_val * mm_per_mv * pixel_per_mm, ytick_val, fontsize=15)
         #plt.axis('equal')
         fig.savefig(save_path + '/' + png_name)  
@@ -437,17 +553,21 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             curr_qrs -= min_p
             
             # define ylim
-            max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)
+            #max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)
            
-            max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
-            min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
+            #max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
+            #min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
             
             
             ax = fig.add_subplot(subplot_RowNum, 1, i+1)
             #ax.clf()
             # the red boxes
             plot_red_lines(ax, pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )              
-            ax.plot(curr_ecg * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1, alpha=1)
+            #ax.plot(curr_ecg * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1, alpha=1)
+            plot_curve(fig = ax, sig = curr_ecg, 
+                       mm_per_mv = mm_per_mv, 
+                       pixel_per_mm  = pixel_per_mm, 
+                       max_mv = max_mv, min_mv = min_mv) 
                               
             # r peak annotations
             # horizontal black lines
@@ -462,7 +582,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             xtick = range( i*10, i*10 +10 )
             plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
                        xtick, fontsize=15)
-            ytick_val = np.arange(min_mv_tmp, max_mv_tmp, np.ceil((max_mv_tmp - min_mv_tmp) / 4) )
+            ytick_val = np.arange(min_mv, max_mv, np.ceil( (max_mv - min_mv) / 4) )
             plt.yticks(ytick_val * mm_per_mv * pixel_per_mm , ytick_val, fontsize=15)
             plt.ylabel('amp/mv',fontsize=25,
                        #verticalalignment='top',
@@ -479,15 +599,19 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         curr_qrs -= min_p
         
         # define ylim
-        max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)           
-        max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
-        min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
+        #max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)           
+        #max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
+        #min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
         
         
         ax = fig.add_subplot(subplot_RowNum, 1, subplot_RowNum)
         #ax.clf()
         plot_red_lines(ax, pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  )          
-        ax.plot(curr_ecg * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1, alpha=1)
+        #ax.plot(curr_ecg * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1, alpha=1)
+        plot_curve(fig = ax, sig = curr_ecg, 
+                   mm_per_mv = mm_per_mv, 
+                   pixel_per_mm = pixel_per_mm, 
+                   max_mv = max_mv, min_mv = min_mv) 
         # r peak annotations
         # horizontal black lines
         ax.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count],
@@ -502,7 +626,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
                    xtick, fontsize=20)
         plt.xlabel('time/s',fontsize=25,horizontalalignment='right')
         #plt.yticks(fontsize=10)
-        ytick_val = np.arange(min_mv_tmp, max_mv_tmp, np.ceil((max_mv_tmp - min_mv_tmp) / 4) )
+        ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
         plt.yticks(ytick_val * mm_per_mv * pixel_per_mm, ytick_val, fontsize=15)
         plt.ylabel('amp/mv',fontsize=25,
                    #verticalalignment='top',
@@ -516,52 +640,54 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
     
 ####### main #######
 
-
-script, path, name, param, save_path = argv
-"""  
-usage:
-python script path name param save_path
-
-path: path to .wav file folder
-name: file name of the .wav file, "name.wav"
-param: parameters for wav processing, .mat file
-save_path: path to .png save folder
-""" 
-
-#path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
-#name = "wt_1514860067686"
-#param = "/home/dingzj/workspace/ECG/Test_bin/pipeline/testcoefficient.mat"
-#save_path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
-
-#read signal .wav
-d_sig = audio2mat(path = path, name = name + '.wav', param_file = param )
+if __name__ == '__main__':
+    script, path, name, param, save_path = argv
+    """  
+    usage:
+    python script path name param save_path
+        
+    path: path to .wav file folder
+    name: file name of the .wav file, "name.wav"
+    param: parameters for wav processing, .mat file
+    save_path: path to .png save folder
+    """ 
     
-# r peak #
-qrs_indices = detect_beats(d_sig, 300)
-qrs_time = indice2time(qrs_indices, 300)
+    path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
+    name = "wt_1515385300534"
+    param = "/home/dingzj/workspace/ECG/Test_bin/pipeline/testcoefficient.mat"
+    save_path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
+        
+    #read signal .wav
+    d_sig = audio2mat(path = path, name = name + '.wav', param_file = param )
+    
+    # r peak #
+    qrs_indices = detect_beats(d_sig, 300)
+    qrs_time = indice2time(qrs_indices, 300)
+    
+    # inverted or not
+    #if inverted_ecg(d_sig, qrs_indices):
+    #    d_sig = -d_sig
+        
+    # plot ecg #
+    figsize = define_figsize(d_sig, 300)
+    plot_save_ecg( ecg_sig = d_sig*100., 
+                  qrs_indices = np.array(qrs_indices), 
+                  save_path = save_path, 
+                  png_name = name+'.png', 
+                  figsize = figsize, fs = 300,
+                  max_mv = 2.5, min_mv = -2.5)
+                     
+    # rr and drr
+    usebeats = define_usebeats(qrs_indices)
+    rr = rr_interval(qrs_time, thresh=usebeats+2, section='sub') 
+    drr = drr_interval(rr) 
+    
+    #nec
+    nec, nec_norm = nec_calc(rr, drr)    
+    
+    #classify
+    thresh = define_thresh(usebeats)
+    pred = classify(nec_norm, thresh=thresh, words=False) # 0.75, args
 
-# inverted or not
-#if inverted_ecg(d_sig, qrs_indices):
-#    d_sig = -d_sig
 
-# plot ecg #
-figsize = define_figsize(d_sig, 300)
-plot_save_ecg( ecg_sig = d_sig*100., 
-              qrs_indices = np.array(qrs_indices), 
-              save_path = save_path, #'C:/Users/neudz_000/Desktop/', #args
-              png_name = name+'.png', 
-              figsize = figsize, fs = 300,
-              max_mv = 2.5, min_mv = -2.5)
-    
-# rr and drr
-usebeats = define_usebeats(qrs_indices)
-rr = rr_interval(qrs_time, thresh=usebeats+2, section='sub') 
-drr = drr_interval(rr) 
-    
-#nec
-nec, nec_norm = nec_calc(rr, drr)    
-    
-#classify
-thresh = define_thresh(usebeats)
-pred = classify(nec_norm, thresh=thresh, words=False) # 0.75, args
     
