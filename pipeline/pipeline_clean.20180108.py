@@ -259,29 +259,39 @@ def nec_calc(rr, drr, gap = 0.025):
     # same length 
     rr = np.delete(rr, 0, axis=0)
     
-    xc = int( (np.max(rr) - np.min(rr) + gap*2) // gap + 1 )
-    yc = int( (np.max(drr) - np.min(drr) + gap*2 ) // gap + 1 )
+    xmin = np.floor(10* (np.min(rr) - gap)) / 10.
+    ymin = np.floor(10*  (np.min(drr) - gap)) / 10.
 
-    xmin = np.min(rr) - gap
-    ymin = np.min(drr) - gap
+    xmax = np.ceil(10* (np.max(rr) + gap)) / 10. 
+    ymax = np.ceil(10* (np.max(drr) + gap)) / 10. 
+    
+    
+    xc = int( (xmax - xmin) // gap + 1 )
+    yc = int( (ymax - ymin) // gap + 1 )
+
+    
 
     mat = np.zeros((xc, yc))
     for i in range(0, xc):
+        # the ith column        
         xleft = xmin + i * gap
         xright = xmin + (i+1) * gap
         new_rr_1 = (xleft <= rr)
         new_rr_2 = (rr < xright)
         new_rr = (new_rr_1 == new_rr_2)
-        for j in range(0, yc):
-            ydown = ymin + j * gap
-            yup = ymin + (j+1) * gap
-            new_drr_1 = (ydown <= drr)
-            new_drr_2 = (drr < yup)
-            new_drr = (new_drr_1 == new_drr_2)
-            for k in range(0, len(new_rr)):
-                if (new_rr[k] == True) & (new_drr[k] == True):
-                    mat[i,j] += 1
-
+        if np.sum(new_rr) > 0:
+            for j in range(0, yc):
+                # the jth                 
+                ydown = ymin + j * gap
+                yup = ymin + (j+1) * gap
+                new_drr_1 = (ydown <= drr)
+                new_drr_2 = (drr < yup)
+                new_drr = (new_drr_1 == new_drr_2)
+                if np.sum(new_drr) > 0:                
+                    for k in range(0, len(new_rr)):
+                        if (new_rr[k] == True) & (new_drr[k] == True):
+                            mat[i,j] += 1
+        
     mat = (mat>0)
     nec = sum(sum(mat))
     normalized_nec = nec/float(len(rr))
@@ -293,9 +303,10 @@ def nec_calc(rr, drr, gap = 0.025):
 
 def define_thresh(usebeats):
     if usebeats == 16:
-        return 0.819
+        return 0.8125222340803984
     if usebeats == 32:
-        return 0.713
+        return 0.6876852600377257
+
 
 def classify( nec_norm, thresh, words = True ):
     prediction = 'Normal'    
@@ -653,7 +664,7 @@ if __name__ == '__main__':
     """ 
     
     path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
-    name = "wt_1515385300534"
+    name = "wt_1515459567349"
     param = "/home/dingzj/workspace/ECG/Test_bin/pipeline/testcoefficient.mat"
     save_path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
         
