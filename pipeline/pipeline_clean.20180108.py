@@ -3,8 +3,7 @@ import scipy.io as sio
 import matplotlib as mpl
 mpl.use('Agg')
 import matplotlib.pyplot as plt
-#import itchat
-#from itchat.content import *
+import scipy
 import scipy.signal
 import scipy.ndimage
 import soundfile as sf
@@ -72,14 +71,14 @@ def keep_sig(sig, fs = 300, keep_time = 30):
     if len(sig) <= fs * keep_time:
         return sig
     else:
-        tmp = len(sig) - fs * keep_time
+        tmp = int(len(sig) - fs * keep_time)
         return sig[tmp:len(sig)]
 
 def audio2mat(path, name, param_file):
     #read wav
     sig, fs = sf.read( path + '/' + name)
     sig = sig[:,0]
-    sig_time = len(sig) / fs
+    sig_time = np.floor(len(sig) / fs)
     # read parameters
     hd_15k = sio.loadmat(param_file)
     ahd = hd_15k['aHd_15k']
@@ -177,7 +176,7 @@ def detect_beats(
     # Robust threshold and normalizator estimation
     thresholds = []
     max_powers = []
-    for i in range(len(decg_power) / ransac_window_size):
+    for i in range(int(len(decg_power) / ransac_window_size)):
         sample = slice(i * ransac_window_size, (i + 1) * ransac_window_size)
         d = decg_power[sample]
         thresholds.append(0.5 * np.std(d))
@@ -218,9 +217,11 @@ def indice2time(peak_indices, fs=300.):
 
 def define_usebeats(qrs_indices):
     peaks = len(qrs_indices)
-    if peaks >= 18 and peaks < 34:
+    if peaks < 18:
+        return 0
+    elif peaks >= 18 and peaks < 34:
         return 16
-    if peaks >= 34:
+    else:
         return 32
 
 def rr_interval( qrs, thresh = 32+2, section = 'sub' ):
@@ -250,6 +251,110 @@ def drr_interval(rr):
         drr[i-1] = rr[i] - rr[i-1] 
     return drr
 
+
+##### calculate sqi for a segment #######
+def intersect(a, b):
+    c = list(set(a) & set(b))
+    c = np.array(c)
+    return np.sort(c)
+    
+def calculate_sqi(seg, qrs, fs=300, IN=0.5, w=10 ):
+    """
+    calculate SQI for single segment of data
+    Inputs: seg -- 1d ecg array
+            qrs -- r peak indices
+            fs -- ecg sampling rate (default: 300 for alivecor)
+            IN -- threshold for average correlation coefficient (default: 0.5)
+    Outputs: R2 -- average correlation coefficient
+             SQI -- 0 if bad, 1 if good
+    """
+    SQI = 0
+    R2 = 0.
+    avtempl = 0.
+    ts = list()
+       
+    rr = np.diff(qrs)
+    hrs = np.floor(np.mean(rr))
+        
+    # Apply Rules: (1) <40 || >180 (2) max(RR) > 3 (3) max(RR) / min(RR) < 2.2
+    if len(qrs)<(40*w)/60 or len(qrs)>(180*w)/60 or max(rr)>3*fs or (max(rr)/min(rr))>=2.2:
+        SQI = 0
+        R2 = None
+        return SQI, R2
+    else:
+        #calculate
+        hr = 60 * fs / hrs
+        j = np.where( qrs > hrs/2 )[0]
+        l = np.where( qrs + hrs/2 < len(seg) )[0]
+        jl = intersect(j, l)
+        if len(l) == 0:
+            SQI = 0
+            R2 = None
+            return SQI, R2
+        else:
+            for k in jl:
+                t = seg[(qrs[k]-int(hrs/2)):(qrs[k]+int(hrs/2))]
+                t /= np.linalg.norm(t, ord=2)
+                ts.append(t)
+                avtempl += t
+ 
+    # mean curve
+    avtempl /= len(ts)    
+    # correlation
+    cor = list()
+    for i in range(len(ts)):
+        curr_cor = scipy.stats.pearsonr(ts[i], avtempl)
+        cor.append(curr_cor[0])
+    R2 = np.mean(cor)
+    if R2 > IN:
+        SQI = 1
+    else:
+        SQI = 0
+    
+    return SQI, R2
+    
+##### calculate sqi for a signal #######
+
+def signal_sqi(d_sig, qrs_indices, fs = 300, IN = 0.5, w=10):
+    """
+    calculate SQI for a ecg signal
+    input: d_sig -- digital signal, numpy array
+           qrs_indices -- indices of r peak
+           fs -- ecg sampling rate (default: 300 for alivecor)
+           IN -- threshold for average correlation coefficient (default: 0.5)
+           w -- window length (default: 10s)
+    output: R2 and SQI for each segment (w long) of d_sig
+    """
+    windsize = fs * w
+    seg_num = int(len(d_sig) / (fs*w))
+    if len(d_sig) % (fs * w) > 0:
+        seg_num += 1
+    
+    sqi_list = list()
+    r2_list = list()
+    for i in range(0, seg_num):
+        min_p = i*windsize
+        if i < seg_num -1:
+            max_p = (i+1) * windsize
+        else:
+            max_p = len(d_sig)-1
+        
+        #curr ecg
+        curr_ecg = d_sig[range(min_p, max_p)]
+        #current qrs_indices
+        m1 = qrs_indices >= min_p
+        m2 = qrs_indices <= max_p
+        curr_qrs = qrs_indices[m1*m2]
+        curr_qrs -= min_p
+        
+        # calculate sqi
+        sqi, r2 = calculate_sqi(curr_ecg, curr_qrs, fs, IN, w)
+        sqi_list.append(sqi)
+        r2_list.append(r2)
+         
+    return sqi_list, r2_list
+
+
 ######## calculate NEC #######
 
 def nec_calc(rr, drr, gap = 0.025):
@@ -259,18 +364,52 @@ def nec_calc(rr, drr, gap = 0.025):
     # same length 
     rr = np.delete(rr, 0, axis=0)
     
-    xmin = np.floor(10* (np.min(rr) - gap)) / 10.
-    ymin = np.floor(10*  (np.min(drr) - gap)) / 10.
+    # range
+    xmin = np.floor(10. * (np.min(rr) - gap)) / 10.
+    ymin = np.floor(10. *  (np.min(drr) - gap)) / 10.
 
-    xmax = np.ceil(10* (np.max(rr) + gap)) / 10. 
-    ymax = np.ceil(10* (np.max(drr) + gap)) / 10. 
+    xmax = np.ceil(10. * (np.max(rr) + gap)) / 10. 
+    ymax = np.ceil(10. * (np.max(drr) + gap)) / 10. 
     
     
+    #cells
+#    xrange = np.arange(xmin, xmax + gap, gap)
+#    yrange = np.arange(ymin, ymax + gap, gap)
+    
+    
+#    # calculate non-empty cells
+#    mat = np.zeros( ( len(yrange), len(xrange) ) )
+#    for i in range(len(yrange)):
+#        # the ith row, bottom to up
+#        ydown = yrange[i]
+#        yup = yrange[i] + gap
+#        DRRdown = (ydown <= drr)
+#        DRRup = (drr < yup)
+#        DRR = (DRRdown == DRRup)
+#        
+#        if np.sum(DRR) > 0:
+#            for j in range(len(xrange)):
+#                # the jth column, left to right
+#                xleft = xrange[j]
+#                xright = xrange[j] + gap
+#                RRleft = (xleft <= rr)
+#                RRright = (rr < xright)
+#                RR = (RRleft == RRright)
+#                if np.sum(RR) > 0:
+#                    a = np.where(RR == True)
+#                    b = np.where(DRR == True)
+#                    c = list(set(a[0]) & set(b[0]))
+#                    if len(c) > 0:
+#                        mat[i,j] = float(len(c))
+#    mat = (mat>0)
+#    nec = sum(sum(mat))
+#    normalized_nec = nec/float(len(rr))
+    
+    
+    # the original method
     xc = int( (xmax - xmin) // gap + 1 )
     yc = int( (ymax - ymin) // gap + 1 )
-
     
-
     mat = np.zeros((xc, yc))
     for i in range(0, xc):
         # the ith column        
@@ -316,7 +455,8 @@ def classify( nec_norm, thresh, words = True ):
         print( prediction )
     return prediction
     
-      
+ 
+     
 
 ######## draw ECG ############
 
@@ -362,19 +502,14 @@ def define_figsize(d_sig, fs = 300):
 def adjust_ylim(ecg, max_mv = 2.5, min_mv = -2.5):
     maxval = np.max(ecg)
     minval = np.min(ecg)
-    if maxval > max_mv:
-        maxval = np.ceil(maxval)
-        if maxval / max_mv > 1.5:
-            maxval = max_mv * 1.5
+    # totally not in the same range
+    if minval > max_mv or maxval < min_mv:
+        maxval += 0.5
+        min_mv += -0.5
+        return maxval, minval
     else:
-        maxval = max_mv
-    if minval < min_mv:
-        minval = - np.ceil(np.abs(minval))
-        if minval / min_mv > 1.5:
-            minval = min_mv * 1.5
-    else:
-        minval = min_mv
-    return maxval, minval
+        return max_mv, min_mv
+    
     
 def plot_red_lines(fig, pixel_per_mm, max_point_time_count, max_point_amp_count, min_point_amp_count  ):
     for xx in range(0, max_point_time_count+pixel_per_mm, pixel_per_mm):
@@ -396,7 +531,7 @@ def plot_red_lines(fig, pixel_per_mm, max_point_time_count, max_point_amp_count,
                          linewidth=1,alpha=0.6)
 
 def plot_curve(fig, sig, mm_per_mv, pixel_per_mm, max_mv, min_mv):
-    if np.max(sig) <= max_mv and np.min(sig) >= min_mv:
+    if (np.max(sig) <= max_mv) and (np.min(sig) >= min_mv):
         fig.plot(sig * mm_per_mv * pixel_per_mm, color='k', label='ecg', linewidth=1.5, alpha=1)
     else:
         ix_up = np.where(sig > max_mv)
@@ -407,29 +542,67 @@ def plot_curve(fig, sig, mm_per_mv, pixel_per_mm, max_mv, min_mv):
         ix = np.sort(ix)
         #find sub-curves out of bounds
         tmp = list()
-        start = ix[0]
-        end = ix[1]
-        for i in range(1,len(ix)):
-            if ix[i] - ix[i-1] > 1:
-                end = ix[i-1]
-                tmp.append([start, end])
-                start = ix[i]
-                end = ix[i+1]
-            if i == len(ix) - 1:
-                end = ix[i]
-                tmp.append([start, end])
+        if len(ix) >= 2:
+            start = ix[0]
+            end = ix[1]
+            for i in range(1,len(ix)):
+                if i == len(ix) - 1:
+                    if ix[i] - ix[i-1] > 1:
+                        end = ix[i-1]
+                        tmp.append([start, end])
+                        tmp.append([ix[i]-1, ix[i]])
+                    else:
+                        end = ix[i]
+                        tmp.append([start, end])   
+                else:
+                    if ix[i] - ix[i-1] > 1:
+                        end = ix[i-1]
+                        tmp.append([start, end])
+                        start = ix[i]
+                        end = ix[i+1]  
+        elif len(ix) == 1:
+            out = ix[0]
+            if out > 0 and out < (len(sig)-1):
+                tmp.append([out-1, out])
+            elif out == 0:
+                tmp.append([out, out+1])
+            elif out == len(sig)-1:
+                tmp.append([out-1, out])
         #find sub-curves in bounds
         curves = list()
-        start = 0
-        end = tmp[0][0]
-        for i in range(0, len(tmp)):
-            curves.append([start, end])
-            start = tmp[i][1] + 1
-            if i == len(tmp) - 1:
-                end = len(sig)
-                curves.append([start, end])
-            else:
-                end = tmp[i+1][0]
+        if tmp[0][0] > 0:
+            start = 0
+            end = tmp[0][0]
+            for i in range(0, len(tmp)):
+                if i < len(tmp) - 1:
+                    curves.append([start, end])
+                    start = tmp[i][1] + 1
+                    end = tmp[i+1][0]
+                else:
+                    curves.append([start, end])
+                    if tmp[i][1] == len(sig) - 1:
+                        continue
+                    else:
+                        start = tmp[i][1] + 1
+                        end = len(sig) - 1
+                        curves.append([start,end])   
+        else:
+            start = tmp[0][1] + 1
+            end = tmp[1][0]
+            for i in range(1, len(tmp)):
+                if i < len(tmp) - 1:
+                    curves.append([start, end])
+                    start = tmp[i][1] + 1
+                    end = tmp[i+1][0]
+                else:
+                    curves.append([start, end])
+                    if tmp[i][1] >= len(sig) - 2:
+                        continue
+                    else:
+                        start = tmp[i][1] + 1
+                        end = len(sig) - 1
+                        curves.append([start,end])  
+
         #draw curves
         for i in range(len(curves)):
             start = curves[i][0]
@@ -492,7 +665,9 @@ def plot_curve(fig, sig, mm_per_mv, pixel_per_mm, max_mv, min_mv):
 
 
 def plot_save_ecg(ecg_sig, qrs_indices, #np.array
-                  save_path, png_name, figsize = (25,35),
+                  #save_path, 
+                  #png_name, 
+                  figsize = (25,35),
                   fs = 300, 
                   mm_per_mv = 10.0, mm_per_s = 25.0, 
                   max_mv = 2.5, min_mv = -2.5):
@@ -513,7 +688,7 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
     
     if subplot_RowNum == 1:
         # define ylim
-        #max_mv, min_mv = adjust_ylim(ecg_sig, max_mv = max_mv, min_mv = min_mv)
+        max_mv, min_mv = adjust_ylim(ecg_sig, max_mv = max_mv, min_mv = min_mv)
 
         fig = plt.figure(1,figsize=figsize,dpi=96)
         fig.clf()
@@ -543,8 +718,9 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
         plt.yticks(ytick_val * mm_per_mv * pixel_per_mm, ytick_val, fontsize=15)
         #plt.axis('equal')
-        fig.savefig(save_path + '/' + png_name)  
-        fig.close()
+        #fig.savefig(save_path + '/' + png_name)  
+        #plt.close()
+        return fig
         
     elif subplot_RowNum > 1:
         # signal longer than 10s
@@ -564,12 +740,10 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             curr_qrs -= min_p
             
             # define ylim
-            #max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)
-           
-            #max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
-            #min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
-            
-            
+            max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)
+            max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
+            min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
+             
             ax = fig.add_subplot(subplot_RowNum, 1, i+1)
             #ax.clf()
             # the red boxes
@@ -578,7 +752,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             plot_curve(fig = ax, sig = curr_ecg, 
                        mm_per_mv = mm_per_mv, 
                        pixel_per_mm  = pixel_per_mm, 
-                       max_mv = max_mv, min_mv = min_mv) 
+                       #max_mv = max_mv, min_mv = min_mv, 
+                       max_mv = max_mv_tmp, min_mv = min_mv_tmp) 
                               
             # r peak annotations
             # horizontal black lines
@@ -593,7 +768,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
             xtick = range( i*10, i*10 +10 )
             plt.xticks(range(0, max_point_time_count, int( mm_per_s * pixel_per_mm)), 
                        xtick, fontsize=15)
-            ytick_val = np.arange(min_mv, max_mv, np.ceil( (max_mv - min_mv) / 4) )
+            #ytick_val = np.arange(min_mv, max_mv, np.ceil( (max_mv - min_mv) / 4) )
+            ytick_val = np.arange(min_mv_tmp, max_mv_tmp, np.ceil( (max_mv_tmp - min_mv_tmp) / 4) )
             plt.yticks(ytick_val * mm_per_mv * pixel_per_mm , ytick_val, fontsize=15)
             plt.ylabel('amp/mv',fontsize=25,
                        #verticalalignment='top',
@@ -610,9 +786,9 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         curr_qrs -= min_p
         
         # define ylim
-        #max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)           
-        #max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
-        #min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
+        max_mv_tmp, min_mv_tmp = adjust_ylim(curr_ecg, max_mv = max_mv, min_mv = min_mv)           
+        max_point_amp_count = int(max_mv_tmp * mm_per_mv * pixel_per_mm)
+        min_point_amp_count = int(min_mv_tmp * mm_per_mv * pixel_per_mm)
         
         
         ax = fig.add_subplot(subplot_RowNum, 1, subplot_RowNum)
@@ -622,7 +798,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         plot_curve(fig = ax, sig = curr_ecg, 
                    mm_per_mv = mm_per_mv, 
                    pixel_per_mm = pixel_per_mm, 
-                   max_mv = max_mv, min_mv = min_mv) 
+                   #max_mv = max_mv, min_mv = min_mv,
+                   max_mv = max_mv_tmp, min_mv = min_mv_tmp) 
         # r peak annotations
         # horizontal black lines
         ax.plot( [0, max_point_time_count], [min_point_amp_count, min_point_amp_count],
@@ -637,7 +814,8 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
                    xtick, fontsize=15)
         plt.xlabel('time/s',fontsize=25,horizontalalignment='right')
         #plt.yticks(fontsize=10)
-        ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
+        #ytick_val = np.arange(min_mv, max_mv, np.ceil((max_mv - min_mv) / 4) )
+        ytick_val = np.arange(min_mv_tmp, max_mv_tmp, np.ceil((max_mv_tmp - min_mv_tmp) / 4) )
         plt.yticks(ytick_val * mm_per_mv * pixel_per_mm, ytick_val, fontsize=15)
         plt.ylabel('amp/mv',fontsize=25,
                    #verticalalignment='top',
@@ -645,14 +823,60 @@ def plot_save_ecg(ecg_sig, qrs_indices, #np.array
         
         plt.axis('equal')
         
-        fig.savefig(save_path + '/' + png_name)
-        plt.close()
+        #fig.savefig(save_path + '/' + png_name)
+        #plt.close()
+        return fig
+ 
+def save_figure(figure, save_path, png_name):
+    figure.savefig(save_path + '/' + png_name)
+
+##### nec classification pipeline #####
+def nec_pipeline(d_sig):
+    # r peak #
+    qrs_indices = detect_beats(d_sig, 300, ransac_window_size=2.0)
+    qrs_time = indice2time(qrs_indices, 300)
     
+    # inverted or not
+    if inverted_ecg(d_sig, qrs_indices):
+        d_sig = -d_sig
+    
+    # plot ecg #
+    figsize = define_figsize(d_sig, 300)
+    fig = plot_save_ecg( ecg_sig = d_sig*100., 
+                        qrs_indices = np.array(qrs_indices), 
+                        #save_path = save_path, 
+                        #png_name = name+'.png', 
+                        figsize = figsize, fs = 300,
+                        mm_per_mv = 10.0, mm_per_s = 25.0,
+                        max_mv = 2.5, min_mv = -2.5)
+    
+    # signal quality #
+    sqi, r2 = signal_sqi(d_sig, qrs_indices, fs =300, IN = 0.5, w=10)
+        
+    # nec classification #
+    usebeats = define_usebeats(qrs_indices)
+    pred = "Unreadable"
+    if usebeats != 0:
+        # rr and drr
+        rr = rr_interval(qrs_time, thresh=usebeats+2, section='sub') 
+        drr = drr_interval(rr) 
+    
+        #nec
+        nec, nec_norm = nec_calc(rr, drr)
+        
+        #classify
+        thresh = define_thresh(usebeats)
+        pred = classify(nec_norm, thresh=thresh, words=False) # 0.75, args
+     
+    else:
+        pred = "Unreadable"
+
+    return pred, fig, sqi, r2
     
 ####### main #######
 
 if __name__ == '__main__':
-    script, path, name, param, save_path = argv
+    #script, path, name, param, save_path = argv
     """  
     usage:
     python script path name param save_path
@@ -663,42 +887,19 @@ if __name__ == '__main__':
     save_path: path to .png save folder
     """ 
     
-    path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
-    name = "wt_1515459567349"
-    param = "/home/dingzj/workspace/ECG/Test_bin/pipeline/testcoefficient.mat"
-    save_path = "/home/dingzj/workspace/ECG/Test_bin/pipeline/data"
+    path = "F:/workspace/ECG/data/cluster"
+    name = "test2066889762"
+    param = "F:/workspace/ECG/Test_bin/pipeline/testcoefficient.mat"
+    save_path = "F:/workspace/ECG/results/nec"
         
     #read signal .wav
-    d_sig = audio2mat(path = path, name = name + '.wav', param_file = param )
+    d_sig = audio2mat(path = path, name = name + '.pcm', param_file = param )
+      
+    #run non-empty cell classification and plot figure
+    pred, fig, sqi, r2 = nec_pipeline(d_sig = d_sig) #pred: prediction, "normal" etc.; fig as figure
     
-    # r peak #
-    qrs_indices = detect_beats(d_sig, 300)
-    qrs_time = indice2time(qrs_indices, 300)
+    # save figure
+    save_figure(fig, save_path, png_name = name + '.png')                
     
-    # inverted or not
-    #if inverted_ecg(d_sig, qrs_indices):
-    #    d_sig = -d_sig
-        
-    # plot ecg #
-    figsize = define_figsize(d_sig, 300)
-    plot_save_ecg( ecg_sig = d_sig*100., 
-                  qrs_indices = np.array(qrs_indices), 
-                  save_path = save_path, 
-                  png_name = name+'.png', 
-                  figsize = figsize, fs = 300,
-                  max_mv = 2.5, min_mv = -2.5)
-                     
-    # rr and drr
-    usebeats = define_usebeats(qrs_indices)
-    rr = rr_interval(qrs_time, thresh=usebeats+2, section='sub') 
-    drr = drr_interval(rr) 
-    
-    #nec
-    nec, nec_norm = nec_calc(rr, drr)    
-    
-    #classify
-    thresh = define_thresh(usebeats)
-    pred = classify(nec_norm, thresh=thresh, words=False) # 0.75, args
-
 
     
